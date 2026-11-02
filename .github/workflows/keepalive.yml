@@ -1,0 +1,54 @@
+name: Keepalive
+
+# 作用：防止 GitHub 因"仓库 60 天无提交"自动停用定时工作流（Auto 掘金签到）。
+# 机制：每周检查一次——
+#   1. 若最后一次 commit 距今 >= 30 天，推送一个空提交，重置 60 天不活跃计时器；
+#   2. 无论何时都调用 GitHub API 启用 auto.yml（幂等，若已被停用则恢复）。
+# 说明：GitHub 停用 scheduled workflow 时不会发邮件，也不产生失败记录，
+#       只能靠这种保活提交 + 主动启用来自愈。
+
+on:
+  schedule:
+    - cron: "23 18 * * 1" # 每周一 UTC 18:23（北京时间周二 02:23），分钟数错开整点高峰
+  workflow_dispatch:
+
+permissions:
+  contents: write # 允许 GITHUB_TOKEN 推送保活提交
+  actions: write # 允许调用 workflow enable API
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Keepalive commit（距上次提交 >= 30 天才触发）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          age=$(( (now - last) / 86400 ))
+          echo "最后一次提交距今 ${age} 天"
+          if [ "$age" -ge 30 ]; then
+            git commit --allow-empty -m "chore: keepalive [skip ci]"
+            git push
+            echo "已推送保活提交，60 天计时器已重置"
+          else
+            echo "未满 30 天，跳过提交"
+          fi
+
+      - name: 确保 Auto（掘金签到）工作流处于启用状态
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/auto.yml/enable")
+          echo "enable auto.yml => HTTP $code (204 = 已启用/原本就启用)"
+          if [ "$code" != "204" ]; then
+            echo "::warning::auto.yml 启用失败，请到 Actions 页面手动检查"
+          fi
